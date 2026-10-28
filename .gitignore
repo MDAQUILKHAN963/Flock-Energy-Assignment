@@ -1,0 +1,14 @@
+# Data is large and licensed separately: download it as described in README.md
+data/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

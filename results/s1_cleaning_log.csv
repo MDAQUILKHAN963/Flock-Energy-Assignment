@@ -1,0 +1,10 @@
+step,rows_after,detail
+load,8518763,"Part1 4,377,877 + Part2 4,140,886 rows"
+timestamps to UTC,8517564,"Part1 converted from UK local time; 1,199 readings in the repeated clock-change hour dropped"
+resolve overlap,7572614,"dropped 944,950 Part2 rows up to 2014-10-01 00:27:07 (Part1 kept there)"
+sort,7572614,stable sort on Unix timestamp
+impossible values -> NaN,7572614,"70 aggregate > 23,000 W; 3,895 appliance > 4,000 W; negatives none"
+drop exact duplicates,6688420,"884,194 identical rows removed"
+one row per timestamp,6556603,"131,817 rows merged: last non-missing reading per channel kept"
+resample to 1 min,920091,2013-10-09 13:06:00 to 2015-07-10 11:56:00
+fill short gaps,920091,"forward-filled gaps <= 5 min; minutes filled: Aggregate 802, Appliance5 3,070; aggregate outage minutes left as NaN: 121,475"

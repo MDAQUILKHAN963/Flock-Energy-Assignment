@@ -1,0 +1,11 @@
+channel,label,missing_pct,zero_pct,mean_w,p99_w,max_w
+Aggregate,Aggregate,13.2,0.0,479.1,3354.0,22726.0
+Appliance1,Fridge,13.33,65.37,17.6,84.6,3072.0
+Appliance2,Freezer (1),13.42,55.38,16.6,56.4,2094.0
+Appliance3,Freezer (2),13.36,50.61,29.1,80.0,585.1
+Appliance4,Washer dryer,13.23,86.35,1.9,0.0,2688.9
+Appliance5,Washing machine,13.87,84.08,10.9,124.7,2461.8
+Appliance6,Dishwasher,13.21,85.93,11.3,0.0,2378.5
+Appliance7,Computer,13.2,76.72,2.5,36.7,2049.0
+Appliance8,Television site,13.3,70.54,5.8,38.4,597.3
+Appliance9,Electric heater,23.02,0.0,76.4,1023.1,2085.3

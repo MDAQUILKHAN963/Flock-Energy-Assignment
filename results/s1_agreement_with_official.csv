@@ -1,0 +1,5 @@
+channel,minutes_compared,mae_w,corr,minutes_within_1w_pct
+Aggregate,797695,4.15,0.9991,89.2
+Fridge,796517,0.07,0.9975,99.2
+Washing machine,791580,0.22,0.9985,99.1
+Dishwasher,797648,0.08,0.9997,99.7

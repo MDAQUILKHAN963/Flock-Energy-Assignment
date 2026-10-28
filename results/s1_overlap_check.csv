@@ -1,0 +1,5 @@
+channel,part,minutes_compared,mae_vs_official_w,corr_vs_official,minutes_within_1w_pct
+Aggregate,Part1,121404,3.3,0.999,90.7
+Aggregate,Part2,121404,57.6,0.794,44.5
+Washing machine,Part1,119804,0.2,0.999,99.0
+Washing machine,Part2,119804,4.0,0.805,97.7
