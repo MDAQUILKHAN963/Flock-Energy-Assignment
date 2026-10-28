@@ -3,6 +3,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 
 from src import config
 
@@ -11,6 +12,11 @@ BLUE, ORANGE, AQUA, YELLOW = "#2a78d6", "#eb6834", "#1baf7a", "#eda100"
 SERIES = [BLUE, ORANGE, AQUA, YELLOW, "#e87ba4", "#008300", "#6250d6", "#e34948"]
 TEXT, TEXT_2, MUTED = "#0b0b0b", "#52514e", "#a3a29c"
 SURFACE, GRID, SHADE = "#fcfcfb", "#e6e5e0", "#ecebe7"
+LIGHT_BLUE = "#cde2fb"
+
+# Sequential (magnitude) ramp: one hue, light -> dark.
+SEQ_CMAP = LinearSegmentedColormap.from_list(
+    "seq_blue", ["#f4f8fd", "#cde2fb", "#86b6ef", "#3987e5", "#256abf", "#184f95", "#0d366b"])
 
 plt.rcParams.update({
     "figure.facecolor": SURFACE,

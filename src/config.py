@@ -33,6 +33,10 @@ HOUSE1_CHANNELS = {
     "Appliance9": "Electric heater",
 }
 
+# Houses used in Sections 2-3 (DATA.md section 6). Excluded: 3, 11, 21 (solar
+# PV in the aggregate), 4 (two washing machines), 13 (machine replaced mid-study).
+STUDY_HOUSES = [1, 2, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18, 19, 20]
+
 # Washing-machine channel per house, per docs/CLEAN_READ_ME_081116.txt.
 # House 4 is omitted (two washing machines on separate channels) and
 # Houses 12 and 14 have no washing-machine channel.
