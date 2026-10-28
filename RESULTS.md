@@ -188,4 +188,196 @@ gentle tumble.
 
 ## Section 3 — Disaggregation model
 
-*(to be added)*
+**Task:** estimate the washing machine's power each minute from the household aggregate only
+(official CLEAN data, 1-minute). Code: [`src/section3_model.py`](src/section3_model.py).
+
+### 3.1 Homes, periods and validation design
+
+| Set | Houses | Period | Used for |
+|---|---|---|---|
+| Train | 1, 5, 6, 7, 9, 10, 16, 18, 19 | each house's full CLEAN record (Sep 2013 – Jul 2015) | fitting (2.11 M rows: every 3rd minute) |
+| Validation | 15, 17 | 2013-12-17 → 2015-07-08; 2014-03-06 → 2015-06-19 | early stopping, the decision threshold τ, choosing between model versions |
+| **Test** | **2, 8, 20** | 2013-09-17 → 2015-05-28; 2013-11-01 → 2015-05-11; 2014-03-20 → 2015-06-23 | final evaluation only: **2.01 M minutes, ~1,400 house-days** |
+
+**Why split by household.** A utility applies the model to *new* customers whose machines and habits
+it has never seen, so the test should do the same. Splitting by house also prevents leakage:
+- Neighbouring minutes are nearly identical, and a random split would put minute *t* in training and
+  minute *t+1* in test.
+- No house appears in more than one set, so a household's routine or its other appliances cannot
+  leak from training into test.
+- All features are computed within one house. The usage-profile baseline is learned on training
+  houses only. Trees need no scaling, so no statistics are fitted on test data.
+
+The test houses differ on purpose: House 2 has 4 occupants and the worst coverage, House 8 has a
+separate washer-dryer and washes at night, and House 20 has a tumble dryer and a dishwasher.
+
+**Which minutes are used.** Evaluation uses every minute where the aggregate and the washing
+machine were observed (outages and frozen readings excluded). As discussed in §2, the CLEAN
+per-sample `Issues` flag fires at almost every appliance switch-on: it marks **11–46 % of washing
+minutes vs 1–6 % of idle minutes**, because IAMs report a few seconds ahead of the aggregate.
+Discarding flagged minutes would delete the start of most washes, so training instead drops only
+minutes where the *1-minute* appliance sum still exceeds the aggregate (0.3–5 %). Evaluation keeps
+them, because a deployed model has no sub-meters to apply this check with.
+
+### 3.2 Model
+
+**Inputs (63 features per minute, aggregate only).** Following Seq2Point (Zhang et al., 2018), the
+model sees a **window centred on the target minute**, here ±60 min, and predicts the washing machine at
+its midpoint. Gradient boosting replaces the CNN: it trains in minutes on a laptop CPU and is easier
+to inspect. Features:
+- the aggregate above the house's 2-hour rolling minimum ("excess", which removes the always-on
+  background load and makes houses comparable), at lags and leads of 1–60 min;
+- rolling mean / std / min / max over 5, 15, 31, 61 and 121 minutes;
+- minutes with a heater-sized step (> 1.5 kW), share of minutes at drum level (50–600 W), and
+  "activity" (mean absolute minute-to-minute change);
+- local time of day (sin/cos) and a weekend flag.
+
+**Two-stage LightGBM (final).** A classifier estimates P(machine running, > 20 W). Where P > τ, a
+regressor trained only on running minutes gives the watts; otherwise the prediction is 0. Splitting
+the "when" from the "how much" follows Precioso & Gómez-Ullate (2020). τ = **0.2** was chosen on the
+**validation** houses (lowest MAE; [`results/s3_validation_model_choice.csv`](results/s3_validation_model_choice.csv)).
+
+**How the final model was chosen.** The first version was a single LightGBM regressor. On the test
+houses its F1 was 0.38 and its precision 0.27, with many false alarms. The two-stage version was then
+built and selected **on validation evidence only**:
+
+| Validation houses 15 + 17 | MAE (W) | Energy error | Precision | Recall | F1 |
+|---|---|---|---|---|---|
+| Always off | 13.9 | −100 % | – | 0 | 0 |
+| One-stage regressor | 9.8 | −46 % | 0.54 | 0.83 | 0.66 |
+| **Two-stage, τ = 0.2** | **7.1** | **−21 %** | **0.83** | 0.73 | **0.78** |
+
+Because the one-stage test numbers had already been seen, **both versions are reported on test**
+below. Also tried during development and rejected on validation: an L1 objective (MAE 11.5 W,
+energy −81 %), and raising the one-stage zero threshold from 20 W up to 400 W (F1 fell to 0.28).
+
+### 3.3 Metrics and why each matters
+
+| Metric | What it answers | Why it is needed |
+|---|---|---|
+| **MAE** (W per minute) | how far off is each minute? | the standard NILM metric, but dominated by the ~95 % idle minutes |
+| **MAE when running** (W) | how well is a running machine tracked? | removes the idle-time dilution |
+| **Energy error** (%) | is total washing energy over the period right? | what a bill breakdown or savings estimate needs |
+| **Daily energy MAE** (kWh/day) | how wrong is each day's washing energy? | the granularity of a customer insight ("you washed 3 times this week") |
+| **On/off precision, recall, F1** | does it know *when* the machine runs? | always-off scores F1 = 0, so this exposes the imbalance |
+| **Cycle recall / precision** | how many washes are found / how many detected washes are real? | the Section 2 cycle rule applied to both actual and predicted series, matched by overlap |
+
+### 3.4 Results on the unseen test houses
+
+[`results/s3_metrics_test.csv`](results/s3_metrics_test.csv). Pooled over Houses 2, 8 and 20; mean actual
+washing energy was 0.46 kWh/day.
+
+| Model | MAE (W) | MAE when running (W) | Energy error | Daily energy MAE (kWh) | Precision | Recall | F1 | Cycle recall | Cycle precision |
+|---|---|---|---|---|---|---|---|---|---|
+| Always off | **19.0** | 540 | −100 % | 0.46 | – | 0 | 0 | 0 % | – |
+| Usage profile | 34.0 | 521 | −12 % | 0.48 | 0.04 | 0.47 | 0.08 | 55 % | 16 % |
+| LightGBM one-stage | 22.5 | 408 | −27 % | 0.31 | 0.27 | **0.65** | 0.38 | **88 %** | 40 % |
+| **LightGBM two-stage** | 20.5 | **361** | **−8 %** | **0.28** | **0.55** | 0.48 | **0.51** | 80 % | **53 %** |
+
+Per house (two-stage): House 2: F1 0.37, energy −13 %, 63 % of washes found; House 8: F1 0.69,
+energy −10 %, 93 % found; House 20: F1 0.45, energy +7 %, 82 % found.
+
+**Interpretation.**
+- **The model beats both baselines on everything that needs timing or energy.** Daily-energy error
+  is 39 % lower than always-off (0.28 vs 0.46 kWh), total energy is within 8 %, and 4 of 5 washes are
+  found. The usage profile gets total energy roughly right (−12 %) but cannot say *when*: it
+  "detects" 2,787 washes for 881 real ones.
+- **Always-off still has the lowest per-minute MAE** (19.0 vs 20.5 W). This is the known weakness of
+  point-wise metrics for rare, spiky loads. Missing a wash costs the energy once, but predicting it
+  a few minutes off costs it twice (a miss plus a false alarm), so a model that does nothing looks
+  best. On validation the two-stage model *does* beat always-off on MAE (7.1 vs 13.9 W); on the
+  test houses false alarms from other heating appliances erase that margin (§3.6). We report MAE but
+  do not judge the model by it alone.
+- **Generalisation varies by house.** Validation F1 was 0.78 but test F1 is 0.51, ranging from 0.37
+  to 0.69 by house. With only 2 validation and 3 test homes, expect ±0.15 F1 on a new home.
+- **What the model relies on** ([`results/s3_feature_importance.csv`](results/s3_feature_importance.csv)): the
+  top features are minute-to-minute "activity" over 5–31 min (≈ 46 % of the classifier's gain), i.e.
+  the drum's on/off tumbling, not the 2 kW heater. That is the distinctive part of a wash (§2.5).
+
+### 3.5 Actual vs predicted on evaluation data
+
+[`figures/s3_actual_vs_predicted.png`](figures/s3_actual_vs_predicted.png): one typical wash per test house
+(chosen automatically as the cycle closest to that house's median), with the aggregate above.
+
+![actual vs predicted](figures/s3_actual_vs_predicted.png)
+
+- **House 8** (night wash, 02:00): heater block, tumbling and spin are all tracked; a 3 kW step just
+  before causes a brief false start.
+- **House 2**: the 12:00 wash is matched closely. The 09:15 wash's heating is **missed** because a
+  ~10 kW load (probably an electric shower) runs at the same moment and swamps the 2 kW heater.
+  The model still recovers the tumbling tail.
+- **House 20**: the wash is detected but its heating energy is under-predicted. From 11:20 a
+  ~1.7 kW cycling load that is not the washing machine produces a **false tail**.
+
+[`figures/s3_daily_energy.png`](figures/s3_daily_energy.png): every full test day.
+
+![daily energy](figures/s3_daily_energy.png)
+
+Daily predictions follow actual washing energy in Houses 8 and 20 (r = 0.79, 0.78). House 2 is
+weak (r = 0.41): many days with no wash get 0.5–2 kWh of false energy. The usage profile (grey)
+is a flat line at ~0.4 kWh/day, right on average and useless day to day.
+
+### 3.6 Failure cases
+
+**1. Other appliances with the same "heater + motor" signature (false alarms).** For each
+false-alarm minute we checked which other sub-metered appliance was running
+([`results/s3_false_positive_sources.csv`](results/s3_false_positive_sources.csv)):
+
+| Share of false-alarm energy | House 2 | House 8 | House 20 |
+|---|---|---|---|
+| Dishwasher | **45 %** | – | **31 %** |
+| Tumble dryer | – | – | **30 %** |
+| Washer-dryer | – | 6 % | – |
+| Kettle / microwave / toaster | 9 % | 4 % | 3 % |
+| No other *metered* appliance | 46 % | **91 %** | 36 % |
+
+Dishwashers and tumble dryers heat at ~2 kW and then run a low-power motor: at 1-minute
+resolution, from the aggregate alone, they look like a wash. Kettles are rarely confused, because they
+are too short and have no motor tail. Most of House 8's false alarms happen when no metered appliance
+is on: an un-metered load (immersion heater, oven, shower) is responsible, which a utility could
+never check.
+
+![failure](figures/s3_failure_false_alarm.png)
+
+*Example:* on New Year's Day in House 20 the washing machine never ran. The dishwasher's two 2.3 kW
+heating blocks, joined by a low pump load, were predicted as a ~2 kW wash.
+
+**2. Washes that use little energy (misses).** Comparing the 845 complete test cycles found with
+the 160 missed ([`results/s3_missed_vs_detected_cycles.csv`](results/s3_missed_vs_detected_cycles.csv)):
+
+| | Cycles | Energy (median) | Duration | Peak | Other load during the wash |
+|---|---|---|---|---|---|
+| Detected | 685 | 0.69 kWh | 76 min | 2,281 W | 441 W |
+| Missed | 160 | 0.48 kWh | 88 min | 2,107 W | 215 W |
+
+Missed washes are mostly cooler/longer programmes with less heating, not ones hidden under other
+loads. A single large coincident load (the House 2 shower above) can still hide a heater, so both
+mechanisms occur. Cold or eco washes, which are increasingly common, are therefore the main blind
+spot.
+
+**3. Where else it is likely to struggle.**
+- **Homes unlike the training set**, e.g. a washer-dryer on one circuit, or electric heating that
+  cycles at 1–2 kW all winter.
+- **Simultaneous heating loads**, such as a dishwasher and washing machine run together after dinner.
+- **Lower resolution** (Recommendation.md, Section 4).
+
+### 3.7 Research used
+
+| Paper | Idea adopted here |
+|---|---|
+| Murray, Stankovic & Stankovic (2017), *Scientific Data* 4:160122 | Data limitations: solar homes excluded, IAM-vs-aggregate asynchrony (which explains the `Issues` flag), zero-filling in CLEAN, uptime figures used to validate our pipeline |
+| Zhang, Zhong, Wang, Goddard & Sutton (2018), *Sequence-to-point learning with neural networks for NILM*, AAAI ([arXiv:1612.09106](https://arxiv.org/abs/1612.09106)) | "Window in, midpoint out": a centred window of the aggregate predicts the appliance at its middle. We keep the framing and swap the CNN for gradient boosting |
+| Kelly & Knottenbelt (2015), *Neural NILM*, BuildSys | 20 W ON threshold for washing machines; activations defined by power and time thresholds; reporting energy and F1 alongside MAE |
+| Precioso & Gómez-Ullate (2020), *NILM as a regression versus classification problem: the importance of thresholding* ([arXiv:2010.16050](https://arxiv.org/abs/2010.16050)) | Separate "is it on?" (classification) from "how much?" (regression); tune the decision threshold; MAE alone is misleading for sparse appliances |
+| D'Incecco, Squartini & Zhong (2020), *Transfer learning for NILM*, IEEE Trans. Smart Grid | Evaluate on houses not seen in training, because performance on new homes is what matters and it drops |
+
+### 3.8 What I would do next
+
+1. **Wider evaluation:** use leave-one-house-out cross-validation over all 14 homes instead of one
+   fixed 9/2/3 split, so that per-house variance (±0.15 F1) gets a proper confidence interval.
+2. **Multi-appliance training:** also predict the dishwasher and tumble dryer, and let the outputs
+   compete for the same energy. This targets the main failure case directly.
+3. **Seq2Point CNN** on the same split for a direct comparison; the literature suggests it learns
+   cycle shapes better, at the cost of GPU training and harder inspection.
+4. **Per-house calibration:** a few days of labelled data from a new home (e.g. a customer
+   confirming "I washed today") could correct house-specific bias.
