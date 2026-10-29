@@ -4,7 +4,7 @@ table in results/ and figure in figures/.
     python run_all.py
 
 Steps: prepare CLEAN houses -> Section 1 (raw House 1) -> Section 2 (EDA) ->
-Section 3 (model). About 6-8 minutes on a 4-core laptop.
+Section 3 (model). About 5-8 minutes on a 4-core laptop.
 """
 import time
 

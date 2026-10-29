@@ -81,17 +81,20 @@ python run_all.py
 ```
 
 This runs everything in order, from the CSVs to every table in [`results/`](results/) and figure in
-[`figures/`](figures/), in about 6–8 minutes. The steps can also be run one at a time:
+[`figures/`](figures/), in about 5–8 minutes. The steps can also be run one at a time:
 
 | Command | Does | Time |
 |---|---|---|
 | `python -m src.prepare_clean` | CLEAN houses → 1-minute parquet in `data/processed/`, screening table | ~35 s |
 | `python -m src.section1_raw` | Section 1: inspection, cleaning, validation vs official data, plots | ~50 s |
-| `python -m src.section2_eda` | Section 2: cycle detection, availability, patterns, plots | ~50 s |
-| `python -m src.section3_model` | Section 3: features, baselines, models, metrics, failure analysis, plots | ~4–6 min |
+| `python -m src.section2_eda` | Section 2: cycle detection, availability, patterns, plots | ~10–50 s |
+| `python -m src.section3_model` | Section 3: features, baselines, models, metrics, failure analysis, plots | ~3–6 min |
 
 Sections 2 and 3 need `prepare_clean` first. Section 3 also reads `results/s2_cycles.csv`.
-Results are deterministic (fixed seed); a rerun reproduces the committed tables.
+
+**Reproducibility check:** after deleting `results/`, `figures/` and `data/processed/`, a fresh
+`python run_all.py` (4.7 min) regenerated all 20 tables value-for-value and all 12 figures
+byte-for-byte identical to the committed ones. LightGBM uses a fixed seed.
 
 ### Code layout
 
