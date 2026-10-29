@@ -170,20 +170,25 @@ Each is justified with evidence in DATA.md or RESULTS.md.
 
 ## AI tools used
 
-This project was developed with **Claude Code** (Anthropic's AI coding assistant, Claude Opus 5.5
-model) working in my local repository. It:
+I used **Claude Code** (Anthropic's AI coding assistant, Claude Opus 5.5 model) as a pair
+programmer in this repository, working through the assignment one section at a time.
 
-- wrote most of the code and drafted the documentation;
-- ran the analyses and checked each figure;
-- proposed the cleaning and modelling decisions and tested them against the data;
-- searched for and read the cited papers.
-
-I directed the work step by step, downloaded the data, reviewed the outputs and decisions, and
-committed and pushed the results. Every number in the documents comes from the committed code and
-can be regenerated with `python run_all.py`. Where the AI's first choice was contradicted by
-evidence, the evidence won, and both are documented: the Part1/Part2 overlap rule, the `Issues`
-handling and the one-stage → two-stage model. The later models (random forest, multi-appliance,
-cycle filter) were judged on validation like the rest, and all are reported on test.
+- **My role:**
+  - set the order and scope of the work;
+  - downloaded and set up the data;
+  - asked for an explanation of what was done at each step and why, and reviewed the results;
+  - decided to add the extra Section 3 models (random forest, multi-appliance, cycle filter);
+  - requested final checks against the brief;
+  - committed and pushed the work.
+- **The assistant's role:** it generated the code and first drafts of the documents, ran the
+  analyses, proposed cleaning and modelling options with the evidence for each, and found and read
+  the cited papers.
+- **How the output was checked:** every number in the documents is produced by the committed code
+  and can be regenerated with `python run_all.py`. A from-scratch run in an empty folder reproduced
+  all 20 tables and 12 figures. Where a first choice was contradicted by evidence, the evidence won,
+  and both are documented: the Part1/Part2 overlap rule, the `Issues` handling and the
+  one-stage → two-stage model. The later models were judged on validation like the rest, and all
+  are reported on test.
 
 ## Possible improvements
 
