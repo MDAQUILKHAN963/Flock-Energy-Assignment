@@ -199,6 +199,17 @@ cycle filter) were judged on validation like the rest, and all are reported on t
 
 ## References
 
+**Dataset:** REFIT Electrical Load Measurements, University of Strathclyde (sources as given in the
+assignment).
+
+- Dataset page and documentation: <https://pureportal.strath.ac.uk/en/datasets/refit-electrical-load-measurements/>
+- Raw REFIT data (.7z): <https://pureportal.strath.ac.uk/files/62090177/REFIT_RAW_081116.7z>
+- Cleaned REFIT data (.7z): <https://pureportal.strath.ac.uk/files/62090184/CLEAN_REFIT_081116.7z>
+- Cleaned REFIT readme: <https://pure.strath.ac.uk/ws/portalfiles/portal/62090183/CLEAN_READ_ME_081116.txt>
+  (a copy is in [`docs/CLEAN_READ_ME_081116.txt`](docs/CLEAN_READ_ME_081116.txt))
+
+**Research papers used** (the idea taken from each is listed in RESULTS.md §3.7):
+
 - Murray, D., Stankovic, L., Stankovic, V. (2017). An electrical load measurements dataset of United
   Kingdom households from a two-year longitudinal study. *Scientific Data* 4, 160122.
 - Zhang, C., Zhong, M., Wang, Z., Goddard, N., Sutton, C. (2018). Sequence-to-point learning with
