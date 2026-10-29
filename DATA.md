@@ -131,7 +131,8 @@ longer than 5 min, 84.4 days in total (**13.2 % of minutes** have no aggregate):
 | > 1 day | 12 | **77.9** |
 
 The longest runs from 24 Jan to 6 Mar 2014 (41.6 days), matching the readme's "missing data
-(notably February 2014)".
+(notably February 2014)". Per-channel missing share, zero share, mean, 99th percentile and maximum
+after cleaning are in [`results/s1_cleaned_summary.csv`](results/s1_cleaned_summary.csv).
 
 ---
 

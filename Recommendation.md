@@ -11,7 +11,7 @@ tested on **three homes it had never seen**, the way it would be used on new cus
 
 | On unseen homes, the model… | Result |
 |---|---|
-| estimates total washing electricity over the year within | **8 %** |
+| estimates total washing electricity over the year within | **15 %** (it under-estimates) |
 | estimates each day's washing electricity with an average error of | **0.28 kWh/day** (about 40 % better than simple baselines) |
 | finds this share of actual washes | **80 %** |
 | is right this often when it says a wash happened | **53 %** |
@@ -69,14 +69,17 @@ persists after the first month. A caveat on targeting: dishwashers often run aft
 ### 2. Limitations
 
 - **Overlapping signatures.** Any appliance with a ~2 kW heater and a motor looks like a wash. In
-  the test homes the **dishwasher caused 31–45 %** and the **tumble dryer 30 %** of false-alarm
-  energy. Un-metered loads (immersion heater, oven, shower) caused most of the rest.
+  the test homes the **dishwasher caused 28–46 %** and the **tumble dryer 31 %** of false-alarm
+  energy. Un-metered loads (immersion heater, oven, shower) caused most of the rest. A model
+  trained specifically to tell these appliances apart improved results only slightly. At 1-minute
+  resolution the whole-house signal simply does not carry enough information to separate them
+  reliably.
 - **Missing data.** 6–25 % of minutes are missing per home. The long gaps hit **every home at once**
   (central system failures). The official data also contains frozen readings and zero-filled gaps,
   which had to be detected and removed. Real smart-meter feeds will have gaps too, so outputs must
   say how much data they rest on.
 - **Household differences.** Accuracy varies a lot between homes (the model's detection score ranged
-  from 0.37 to 0.69). Energy per wash varies 3× (cool vs hot washes), and each home has its own
+  from 0.33 to 0.72). Energy per wash varies 3× (cool vs hot washes), and each home has its own
   routine. Results are reliable for groups of homes, much less so for any single home.
 - **UK → India.** This model should not be used in India without new data and re-training.
   - **Different machines.** Many Indian machines are semi-automatic or top-loading **without an
@@ -93,8 +96,9 @@ persists after the first month. A caveat on targeting: dishwashers often run aft
 ### 3. With only 15- or 30-minute smart-meter data
 
 A typical wash lasts about 70 minutes. Its distinctive features are minute-scale: a 5–20-minute
-2 kW heating block, then the drum switching on and off every few minutes. That on/off "activity" is
-what the model relies on most (about half of its decision-making). At 15-minute resolution the
+2 kW heating block, then the drum switching on and off every few minutes. Counting heater-sized
+minutes and measuring that minute-to-minute on/off "activity" is what the model relies on most
+(about 60 % of its decision-making). At 15-minute resolution the
 heating block becomes one or two readings raised by about 1–2 kW, which look the same as an oven,
 a shower or a run of kettle boils. The drum pattern averages away entirely. At 30 minutes a whole wash is just 2–3
 slightly raised readings. **Detecting individual washes and their timing becomes largely

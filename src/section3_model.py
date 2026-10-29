@@ -1,16 +1,26 @@
 """Section 3: estimate washing-machine power from the household aggregate (1 minute).
 
 Inputs: a window of the aggregate around each minute (the Seq2Point idea,
-"window in, midpoint out", with gradient boosting instead of a CNN).
-Final model, two-stage LightGBM: a classifier estimates P(machine running); where
-P > tau a regressor trained on running minutes gives the watts, otherwise 0.
-Also reported: a one-stage LightGBM regressor (the first version), and two
-baselines: always-off, and a usage profile (mean washing-machine power by local
+"window in, midpoint out", with tree models instead of a CNN). All models see
+the same 63 features.
+
+Models (all two-stage ones: a classifier gives P(machine running); where P > tau
+a regressor trained on running minutes gives the watts, otherwise 0):
+  * LightGBM one-stage  - a single regressor (the first version)
+  * LightGBM two-stage  - binary classifier + regressor
+  * Random forest two-stage - the same design with scikit-learn random forests
+  * LightGBM multi-appliance - the classifier also learns the look-alike
+    appliances (dishwasher, tumble dryer, washer-dryer) as their own class, so
+    they compete with the washing machine for the same signal
+  * "+ cycle filter" - any of the above, keeping predicted power only inside
+    events that pass the Section 2 cycle rule (removes short false alarms)
+Baselines: always-off, and a usage profile (mean washing-machine power by local
 hour x weekday/weekend, learned on the training houses).
 
 Split by household (no house in more than one set):
-  train TRAIN_HOUSES; validation VAL_HOUSES (early stopping and choice of tau);
-  test TEST_HOUSES (evaluated at the end). Evaluation uses every minute where the aggregate
+  train TRAIN_HOUSES; validation VAL_HOUSES (early stopping, tau, and the choice
+  of final model: lowest validation MAE); test TEST_HOUSES (every model is
+  reported). Evaluation uses every minute where the aggregate
   and the washing machine are observed; training also drops minutes where the
   1-minute appliance sum exceeds the aggregate (see house_frame).
 
@@ -19,11 +29,12 @@ Run: python -m src.section3_model   (after python -m src.prepare_clean)
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 from src import config, plotting
 from src.plotting import BLUE, MUTED, ORANGE, TEXT_2, plt
 from src.refit_io import read_clean_house
-from src.section2_eda import LOCAL_TZ, ON_W, detect_events, load_house
+from src.section2_eda import LOCAL_TZ, ON_W, detect_events, frozen, load_house
 
 TRAIN_HOUSES = [1, 5, 6, 7, 9, 10, 16, 18, 19]
 VAL_HOUSES = [15, 17]
@@ -45,6 +56,17 @@ OTHER_LOADS = {
     20: {"Appliance3": "Tumble dryer", "Appliance5": "Dishwasher", "Appliance8": "Microwave",
          "Appliance9": "Kettle"},
 }
+
+# Appliances with the same "heater + motor" signature, per training/validation
+# house (from the readme): dishwasher, tumble dryer, washer-dryer. They give the
+# multi-appliance classifier its third class. Test houses are never used here.
+LOOKALIKES = {
+    1: ["Appliance4", "Appliance6"], 5: ["Appliance2", "Appliance4"], 6: ["Appliance3"],
+    7: ["Appliance4", "Appliance6"], 9: ["Appliance2", "Appliance4"], 10: ["Appliance6"],
+    16: ["Appliance6"], 18: ["Appliance4", "Appliance6"], 19: [],
+    15: ["Appliance2", "Appliance4"], 17: ["Appliance3"],
+}
+NONE, WASHER, LOOKALIKE = 0, 1, 2   # classes of the multi-appliance classifier
 
 
 def make_features(d):
@@ -91,6 +113,15 @@ def house_frame(house):
     # Evaluation keeps every observed minute: a deployed model has no sub-meters
     # to run this check with.
     d["train_ok"] = valid & (d["iam_sum"] <= d["aggregate"])
+
+    # 3-class label: washing machine running, else a look-alike running, else none.
+    lookalike = pd.Series(False, index=d.index)
+    cols = LOOKALIKES.get(house, [])
+    if cols:
+        app = read_clean_house(house, cols)[cols].resample("1min").mean().reindex(d.index)
+        running = [(app[c] > ON_W) & ~frozen(app[c]) for c in cols]
+        lookalike = pd.concat(running, axis=1).any(axis=1)
+    d["label"] = np.where(d["wm"] > ON_W, WASHER, np.where(lookalike, LOOKALIKE, NONE))
     return d, X, valid
 
 
@@ -116,14 +147,22 @@ LGB_PARAMS = dict(n_estimators=3000, learning_rate=0.05, num_leaves=63, min_chil
 TAUS = (0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5)
 
 
-class TwoStage:
-    """P(running) from a classifier; watts from a regressor fitted on running minutes."""
+# Fixed in advance, not tuned: enough trees for stable probabilities, each tree
+# on a 25 % sample, leaves of >= 20 minutes.
+RF_PARAMS = dict(n_estimators=100, max_samples=0.25, min_samples_leaf=20, max_features="sqrt",
+                 random_state=SEED, n_jobs=-1)
 
-    def __init__(self, clf, reg, tau):
-        self.clf, self.reg, self.tau = clf, reg, tau
+
+class TwoStage:
+    """P(washing machine running) from a classifier; watts from a regressor fitted
+    on running minutes. `on_label` is the classifier's class for "running"."""
+
+    def __init__(self, clf, reg, on_label, tau=None):
+        self.clf, self.reg, self.on_label, self.tau = clf, reg, on_label, tau
 
     def parts(self, X):
-        return self.clf.predict_proba(X)[:, 1], np.clip(self.reg.predict(X), 0, 4000)
+        col = list(self.clf.classes_).index(self.on_label)
+        return self.clf.predict_proba(X)[:, col], np.clip(self.reg.predict(X), 0, 4000)
 
     def predict(self, X, tau=None):
         prob, watts = self.parts(X)
@@ -133,37 +172,65 @@ class TwoStage:
 def training_data(train, val):
     Xtr = pd.concat([X[d["train_ok"]][::TRAIN_STRIDE] for d, X, _ in train])
     ytr = pd.concat([d["wm"][d["train_ok"]][::TRAIN_STRIDE] for d, _, _ in train]).to_numpy()
+    ctr = np.concatenate([d["label"][d["train_ok"].to_numpy()][::TRAIN_STRIDE] for d, _, _ in train])
     Xva = pd.concat([X[v] for _, X, v in val])
     yva = pd.concat([d["wm"][v] for d, _, v in val]).to_numpy()
-    return Xtr, ytr, Xva, yva
+    cva = np.concatenate([d["label"][v.to_numpy()] for d, _, v in val])
+    return Xtr, ytr, ctr, Xva, yva, cva
 
 
 def train_models(train, val):
-    """Fit the one-stage regressor and the two-stage model; choose tau on validation."""
-    Xtr, ytr, Xva, yva = training_data(train, val)
+    """Fit every model; choose each two-stage model's tau on validation (lowest MAE)."""
+    Xtr, ytr, ctr, Xva, yva, cva = training_data(train, val)
     stop = [lgb.early_stopping(100, verbose=False)]
+    on_tr, on_va = ytr > ON_W, yva > ON_W
 
     one_stage = lgb.LGBMRegressor(**LGB_PARAMS)
     one_stage.fit(Xtr, ytr, eval_set=[(Xva, yva)], eval_metric="l1", callbacks=stop)
 
-    clf = lgb.LGBMClassifier(**LGB_PARAMS)
-    clf.fit(Xtr, ytr > ON_W, eval_set=[(Xva, yva > ON_W)], callbacks=stop)
-    on_tr, on_va = ytr > ON_W, yva > ON_W
+    # Watts given running: shared by both LightGBM two-stage models, so the
+    # multi-appliance comparison changes only the classifier.
     reg = lgb.LGBMRegressor(**LGB_PARAMS)
     reg.fit(Xtr[on_tr], ytr[on_tr], eval_set=[(Xva[on_va], yva[on_va])], eval_metric="l1",
             callbacks=stop)
+    clf = lgb.LGBMClassifier(**LGB_PARAMS)
+    clf.fit(Xtr, on_tr, eval_set=[(Xva, on_va)], callbacks=stop)
+    multi = lgb.LGBMClassifier(**LGB_PARAMS)
+    multi.fit(Xtr, ctr, eval_set=[(Xva, cva)], callbacks=stop)
 
-    model = TwoStage(clf, reg, tau=None)
-    sweep = [{"model": "always off", **quick_scores(np.zeros_like(yva), yva)},
-             {"model": "one-stage", **quick_scores(postprocess(one_stage.predict(Xva)), yva)}]
-    for tau in TAUS:
-        sweep.append({"model": f"two-stage tau={tau}", "tau": tau,
-                      **quick_scores(model.predict(Xva, tau), yva)})
-    sweep = pd.DataFrame(sweep)
-    model.tau = float(sweep.loc[sweep["mae_w"][sweep["tau"].notna()].idxmin(), "tau"])
-    info = {"train_rows": len(Xtr), "one_stage_iters": one_stage.best_iteration_,
-            "clf_iters": clf.best_iteration_, "reg_iters": reg.best_iteration_, "tau": model.tau}
-    return one_stage, model, sweep, info
+    rf_clf = RandomForestClassifier(**RF_PARAMS).fit(Xtr, on_tr)
+    rf_reg = RandomForestRegressor(**RF_PARAMS).fit(Xtr[on_tr], ytr[on_tr])
+
+    models = {
+        "LightGBM two-stage": TwoStage(clf, reg, True),
+        "Random forest two-stage": TwoStage(rf_clf, rf_reg, True),
+        "LightGBM multi-appliance": TwoStage(multi, reg, WASHER),
+    }
+    sweep = [{"model": "Always off", **quick_scores(np.zeros_like(yva), yva)},
+             {"model": "LightGBM one-stage", **quick_scores(postprocess(one_stage.predict(Xva)), yva)}]
+    for name, model in models.items():
+        prob, watts = model.parts(Xva)
+        rows = [{"model": name, "tau": tau, **quick_scores(np.where(prob > tau, watts, 0.0), yva)}
+                for tau in TAUS]
+        model.tau = min(rows, key=lambda r: r["mae_w"])["tau"]
+        sweep += rows
+    info = {"train_rows": len(Xtr), "label_counts": np.bincount(ctr).tolist(),
+            "one_stage_iters": one_stage.best_iteration_, "reg_iters": reg.best_iteration_,
+            "clf_iters": clf.best_iteration_, "multi_iters": multi.best_iteration_,
+            "taus": {n: m.tau for n, m in models.items()}}
+    return one_stage, models, pd.DataFrame(sweep), info
+
+
+def cycle_filter(p, index, valid):
+    """Keep predicted power only inside predicted events that pass the Section 2
+    cycle rule; shorter or smaller events (likely false alarms) become 0."""
+    full = pd.Series(np.nan, index=index)
+    full[valid] = p
+    ev = detect_events(full)
+    keep = pd.Series(False, index=index)
+    for s, e in zip(ev.loc[ev["is_cycle"], "start"], ev.loc[ev["is_cycle"], "end"]):
+        keep.loc[s:e] = True
+    return np.where(keep[valid].to_numpy(), p, 0.0)
 
 
 def quick_scores(p, y):
@@ -253,7 +320,7 @@ def false_positive_sources(house, d, valid, p):
     """Which other metered heavy appliance was running when the model wrongly said ON."""
     others = OTHER_LOADS[house]
     app = read_clean_house(house, list(others))[list(others)].resample("1min").mean()
-    app = app.reindex(d.index)[valid]
+    app = app.reindex(d.index)[valid].fillna(0)   # a missing reading counts as "not running"
     y = d["wm"][valid].to_numpy()
     fp = (p > ON_W) & (y <= ON_W)
     running = app.to_numpy() > 200
@@ -265,12 +332,12 @@ def false_positive_sources(house, d, valid, p):
     return share, s.sum(), pd.Series(np.where(fp, label, ""), index=d.index[valid]), app
 
 
-def missed_cycles(test, preds):
+def missed_cycles(test, preds, final):
     """Compare true cycles the model found with the ones it missed."""
     rows = []
     for house, (d, _, valid) in test.items():
         p_full = pd.Series(np.nan, index=d.index)
-        p_full[valid] = preds[FINAL][house]
+        p_full[valid] = preds[final][house]
         t = detect_events(d["wm"].where(valid))
         t = t[t["is_cycle"] & ~t["truncated"]].copy()
         p = detect_events(p_full)
@@ -289,7 +356,7 @@ def missed_cycles(test, preds):
     return c, summary
 
 
-def plot_false_alarm(house, d, valid, p, fp_label, app):
+def plot_false_alarm(house, d, valid, p, fp_label, app, final):
     """A failure case: the day with the most false-alarm energy during another
     metered heating appliance, on a day without any real wash."""
     pred = pd.Series(p, index=d.index[valid])
@@ -315,7 +382,7 @@ def plot_false_alarm(house, d, valid, p, fp_label, app):
     ax_a.set_title(f"House {house}, {day.strftime('%a %d %b %Y')}: the washing machine never ran",
                    loc="left")
     ax_w.plot(t, w["wm"], color=BLUE, lw=1.2, label="actual washing machine")
-    ax_w.plot(t, pred.reindex(w.index), color=ORANGE, lw=1.4, label="predicted (two-stage LightGBM)")
+    ax_w.plot(t, pred.reindex(w.index), color=ORANGE, lw=1.4, label=f"predicted ({final})")
     ax_w.set_ylabel("W")
     ax_w.legend(loc="upper right")
     ax_w.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter("%H:%M", tz=LOCAL_TZ))
@@ -327,7 +394,7 @@ def plot_false_alarm(house, d, valid, p, fp_label, app):
 
 # ---------------------------------------------------------------- figures
 
-def plot_actual_vs_predicted(test, preds, cycles_csv):
+def plot_actual_vs_predicted(test, preds, cycles_csv, final):
     """One typical true cycle per test house: aggregate, true and predicted WM."""
     cyc = pd.read_csv(cycles_csv, parse_dates=["start", "end"])
     fig = plt.figure(figsize=(13, 10))
@@ -345,14 +412,14 @@ def plot_actual_vs_predicted(test, preds, cycles_csv):
         w = d.loc[lo:hi]
         t = w.index.tz_convert(LOCAL_TZ)
         pm = pd.Series(np.nan, index=d.index)
-        pm[valid] = preds[FINAL][house]
+        pm[valid] = preds[final][house]
         ax_a.plot(t, w["aggregate"], color=MUTED, lw=1)
         ax_a.set_ylabel("aggregate\n(W)")
         ax_a.tick_params(labelbottom=False)
         ax_a.set_title(f"Test House {house} (never seen in training)", loc="left")
         ax_w.fill_between(t, w["wm"], color=BLUE, alpha=0.35, lw=0, label="actual washing machine")
         ax_w.plot(t, w["wm"], color=BLUE, lw=1)
-        ax_w.plot(t, pm.loc[lo:hi], color=ORANGE, lw=1.4, label="predicted (two-stage LightGBM)")
+        ax_w.plot(t, pm.loc[lo:hi], color=ORANGE, lw=1.4, label=f"predicted ({final})")
         ax_w.set_ylabel("washing\nmachine (W)")
         for ax in (ax_a, ax_w):
             ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter("%H:%M", tz=LOCAL_TZ))
@@ -366,21 +433,21 @@ def plot_actual_vs_predicted(test, preds, cycles_csv):
     return plotting.save(fig, "s3_actual_vs_predicted.png")
 
 
-def plot_daily(test, preds):
+def plot_daily(test, preds, final):
     """Daily washing-machine energy, actual vs predicted, on full test days."""
     fig, axes = plt.subplots(1, len(test), figsize=(13, 4.3), sharex=True, sharey=True)
     hi = 0
     for ax, (house, (d, _, valid)) in zip(axes, test.items()):
         idx = d.index[valid]
         day = idx.tz_convert(LOCAL_TZ).normalize()
-        df = pd.DataFrame({"y": d["wm"][valid].to_numpy(), "p": preds[FINAL][house],
+        df = pd.DataFrame({"y": d["wm"][valid].to_numpy(), "p": preds[final][house],
                            "prof": preds["Usage profile"][house]}, index=day)
         g = df.groupby(level=0)
         full = g.size() >= 0.95 * 1440
         kwh = g.sum()[full] / 60 / 1000
         hi = max(hi, kwh[["y", "p"]].max().max())
         ax.scatter(kwh["y"], kwh["prof"], s=10, color=MUTED, label="usage-profile baseline", zorder=2)
-        ax.scatter(kwh["y"], kwh["p"], s=12, color=ORANGE, label="two-stage LightGBM", zorder=3)
+        ax.scatter(kwh["y"], kwh["p"], s=12, color=ORANGE, label=final, zorder=3)
         r = np.corrcoef(kwh["y"], kwh["p"])[0, 1]
         ax.set_title(f"House {house}: {full.sum()} days, r = {r:.2f}", loc="left")
         ax.set_xlabel("actual kWh / day")
@@ -394,67 +461,90 @@ def plot_daily(test, preds):
     return plotting.save(fig, "s3_daily_energy.png")
 
 
-FINAL = "LightGBM two-stage"
+FILTERED = " + cycle filter"
+BASELINES = ("Always off", "Usage profile")
+
+
+def importance(model, columns):
+    """Share of the classifier's importance per feature (LightGBM: gain; forest: impurity)."""
+    clf = model.clf
+    vals = clf.booster_.feature_importance("gain") if hasattr(clf, "booster_") else clf.feature_importances_
+    s = pd.Series(vals, index=columns, dtype=float)
+    return (100 * s / s.sum()).sort_values(ascending=False)
 
 
 def main():
     config.RESULTS.mkdir(parents=True, exist_ok=True)
     train = [house_frame(h) for h in TRAIN_HOUSES]
     val = [house_frame(h) for h in VAL_HOUSES]
-    one_stage, model, sweep, info = train_models(train, val)
+    one_stage, models, sweep, info = train_models(train, val)
     profile = profile_table(train)
     print(info)
     sweep.round(4).to_csv(config.RESULTS / "s3_validation_model_choice.csv", index=False)
-    print(sweep.round(3).to_string(index=False))
 
     def predict_all(frames, houses):
-        out = {"Always off": {}, "Usage profile": {}, "LightGBM one-stage": {}, FINAL: {}}
+        out = {name: {} for name in BASELINES}
         for house, (d, X, valid) in zip(houses, frames):
             out["Always off"][house] = np.zeros(int(valid.sum()))
             out["Usage profile"][house] = profile_predict(profile, d.index[valid])
-            out["LightGBM one-stage"][house] = postprocess(one_stage.predict(X[valid]))
-            out[FINAL][house] = model.predict(X[valid])
+            learned = {"LightGBM one-stage": postprocess(one_stage.predict(X[valid]))}
+            learned.update({name: m.predict(X[valid]) for name, m in models.items()})
+            for name, p in learned.items():
+                out.setdefault(name, {})[house] = p
+                out.setdefault(name + FILTERED, {})[house] = cycle_filter(p, d.index, valid)
         return out
 
     val_results = evaluate(VAL_HOUSES, val, predict_all(val, VAL_HOUSES))
     val_results.round(4).to_csv(config.RESULTS / "s3_metrics_validation.csv", index=False)
+
+    # The final model is chosen here, on validation only: lowest pooled MAE among learned models.
+    pooled = val_results[(val_results["house"] == "all") & ~val_results["model"].isin(BASELINES)]
+    final = pooled.loc[pooled["mae_w"].idxmin(), "model"]
+    print(f"final model (lowest validation MAE): {final}")
 
     test = {h: house_frame(h) for h in TEST_HOUSES}
     preds = predict_all(list(test.values()), TEST_HOUSES)
     results = evaluate(TEST_HOUSES, list(test.values()), preds)
     results.round(4).to_csv(config.RESULTS / "s3_metrics_test.csv", index=False)
 
-    importance = pd.Series(model.clf.booster_.feature_importance("gain"), index=model.clf.feature_name_)
-    (importance / importance.sum() * 100).sort_values(ascending=False).round(2) \
-        .to_csv(config.RESULTS / "s3_feature_importance.csv", header=["gain_pct"])
+    base_name = final.replace(FILTERED, "")
+    final_model = models.get(base_name)
+    imp = importance(final_model if final_model else models["LightGBM two-stage"], train[0][1].columns)
+    imp.round(2).to_csv(config.RESULTS / "s3_feature_importance.csv", header=["importance_pct"])
 
-    fp, fp_detail = {}, {}
-    for house, (d, _, valid) in test.items():
-        share, kwh, labels, app = false_positive_sources(house, d, valid, preds[FINAL][house])
-        fp[house], fp_detail[house] = share, (labels, app)
-        print(f"House {house}: false-positive energy {kwh:.1f} kWh by co-running appliance (%):",
-              share.to_dict())
-    fp = pd.DataFrame(fp).fillna(0)
-    fp.to_csv(config.RESULTS / "s3_false_positive_sources.csv")
+    # False alarms of the final model, and of the binary two-stage model for comparison.
+    fp_rows, fp_detail = [], {}
+    for name in dict.fromkeys([final, "LightGBM two-stage"]):
+        for house, (d, _, valid) in test.items():
+            share, kwh, labels, app = false_positive_sources(house, d, valid, preds[name][house])
+            if name == final:
+                fp_detail[house] = (labels, app)
+            fp_rows += [{"model": name, "house": house, "source": src, "share_pct": pct,
+                         "false_alarm_kwh_total": round(kwh, 1)} for src, pct in share.items()]
+    fp_long = pd.DataFrame(fp_rows)
+    fp_long.to_csv(config.RESULTS / "s3_false_positive_sources.csv", index=False)
+    fp = fp_long[fp_long["model"] == final].pivot(index="source", columns="house", values="share_pct").fillna(0)
+    print(fp_long.pivot_table(index=["model", "source"], columns="house", values="share_pct").round(1))
 
-    cycles, missed = missed_cycles(test, preds)
+    cycles, missed = missed_cycles(test, preds, final)
     missed.round(3).to_csv(config.RESULTS / "s3_missed_vs_detected_cycles.csv")
     print(missed.round(2).to_string())
 
-    plot_actual_vs_predicted(test, preds, config.RESULTS / "s2_cycles.csv")
-    plot_daily(test, preds)
+    plot_actual_vs_predicted(test, preds, config.RESULTS / "s2_cycles.csv", final)
+    plot_daily(test, preds, final)
     named_share = 100 - fp.loc["no other metered appliance"]
     house = int(named_share.idxmax())
     d, _, valid = test[house]
-    _, day, appliance = plot_false_alarm(house, d, valid, preds[FINAL][house], *fp_detail[house])
+    _, day, appliance = plot_false_alarm(house, d, valid, preds[final][house], *fp_detail[house], final)
     print(f"failure example: House {house}, {day.date()}, {appliance}")
 
     cols = ["model", "house", "mae_w", "mae_when_on_w", "energy_error_pct", "daily_kwh_mae",
             "on_precision", "on_recall", "on_f1", "cycle_recall", "cycle_precision",
             "true_cycles", "pred_cycles"]
+    print(val_results.loc[val_results["house"] == "all", cols].round(3).to_string(index=False))
+    print(results.loc[results["house"] == "all", cols].round(3).to_string(index=False))
     print(results[cols].round(3).to_string(index=False))
-    print(val_results[cols].round(3).to_string(index=False))
-    print(importance.sort_values(ascending=False).head(12).round(0).to_string())
+    print(imp.head(12).round(1).to_string())
 
 
 if __name__ == "__main__":

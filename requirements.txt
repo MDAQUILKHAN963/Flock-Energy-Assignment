@@ -1,7 +1,7 @@
 numpy==2.5.4
 pandas==3.1.0
-pyarrow==26.0.0
+pyarrow==26.0.0          # fast CSV reading and parquet files
 matplotlib==3.11.2
-scikit-learn==1.9.1
+scikit-learn==1.9.1      # required by LightGBM's scikit-learn interface
 lightgbm==4.7.0
-py7zr==1.1.4
+py7zr==1.1.4             # extracting the .7z archives (README, Data)

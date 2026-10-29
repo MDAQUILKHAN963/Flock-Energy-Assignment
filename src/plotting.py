@@ -7,9 +7,8 @@ from matplotlib.colors import LinearSegmentedColormap
 
 from src import config
 
-# Categorical slots, used in this fixed order (validated colour-blind-safe set).
-BLUE, ORANGE, AQUA, YELLOW = "#2a78d6", "#eb6834", "#1baf7a", "#eda100"
-SERIES = [BLUE, ORANGE, AQUA, YELLOW, "#e87ba4", "#008300", "#6250d6", "#e34948"]
+# Categorical colours, used in this fixed order (validated colour-blind-safe set).
+BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 TEXT, TEXT_2, MUTED = "#0b0b0b", "#52514e", "#a3a29c"
 SURFACE, GRID, SHADE = "#fcfcfb", "#e6e5e0", "#ecebe7"
 LIGHT_BLUE = "#cde2fb"

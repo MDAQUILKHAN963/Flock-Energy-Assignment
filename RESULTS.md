@@ -207,6 +207,10 @@ it has never seen, so the test should do the same. Splitting by house also preve
   leak from training into test.
 - All features are computed within one house. The usage-profile baseline is learned on training
   houses only. Trees need no scaling, so no statistics are fitted on test data.
+- *Stated for completeness:* the definitions in §2 (the 20 W ON level, the cycle rule, the
+  frozen-sensor rule) were set by looking at all 14 houses, including the test houses. They define
+  *what counts as a wash* (the label and the evaluation unit), not anything the model learns. The
+  model never sees a test-house label, and none of these values was tuned to improve test scores.
 
 The test houses differ on purpose: House 2 has 4 occupants and the worst coverage, House 8 has a
 separate washer-dryer and washes at night, and House 20 has a tumble dryer and a dishwasher.
@@ -232,30 +236,55 @@ to inspect. Features:
   "activity" (mean absolute minute-to-minute change);
 - local time of day (sin/cos) and a weekend flag.
 
-**Two-stage LightGBM (final).** A classifier estimates P(machine running, > 20 W). Where P > τ, a
-regressor trained only on running minutes gives the watts; otherwise the prediction is 0. Splitting
-the "when" from the "how much" follows Precioso & Gómez-Ullate (2020). τ = **0.2** was chosen on the
-**validation** houses (lowest MAE; [`results/s3_validation_model_choice.csv`](results/s3_validation_model_choice.csv)).
+**Models compared.** Every model uses the same features and split, and changes one thing at a time.
 
-**How the final model was chosen.** The first version was a single LightGBM regressor. On the test
-houses its F1 was 0.38 and its precision 0.27, with many false alarms. The two-stage version was then
-built and selected **on validation evidence only**:
+| Model | What it is | Why it is included |
+|---|---|---|
+| LightGBM one-stage | a single regressor predicting watts | the first version |
+| **LightGBM two-stage** | a classifier estimates P(machine running, > 20 W); where P > τ, a regressor trained only on running minutes gives the watts, otherwise 0 | separates "when" from "how much" (Precioso & Gómez-Ullate, 2020) |
+| **Random forest two-stage** | the same design with scikit-learn random forests (100 trees, 25 % sample per tree, leaves ≥ 20 minutes; fixed in advance, not tuned) | the assignment's suggested model; checks whether the result depends on the boosting library |
+| **LightGBM multi-appliance** | the classifier learns **three classes**: washing machine / look-alike (dishwasher, tumble dryer or washer-dryer running) / neither. It reuses the same watts regressor | targets the main failure: look-alikes get their own class instead of being lumped in with "nothing on", so they compete with the washing machine for the same signal |
+| **"+ cycle filter"** | any of the above, keeping predicted power only inside predicted events that pass the Section 2 cycle rule (≥ 10 min, ≥ 0.05 kWh) | removes short false alarms with a rule we already justified, with nothing new to tune |
 
-| Validation houses 15 + 17 | MAE (W) | Energy error | Precision | Recall | F1 |
+The look-alike labels come from the training and validation homes' own dishwasher, tumble-dryer and
+washer-dryer channels (readme). The same frozen-sensor rule is applied to those channels: House 10's
+dishwasher channel alone held 44,222 frozen minutes that would otherwise have been labelled
+"running". Training rows: 1,936,337 neither, 87,988 washing machine, 87,474 look-alike. **Test
+homes' appliance channels are never used for training.**
+
+**Choosing τ and the final model, on validation only.** Each two-stage model's τ is the value with
+the lowest validation MAE (0.2 for both LightGBM models, 0.3 for the forest;
+[`results/s3_validation_model_choice.csv`](results/s3_validation_model_choice.csv)). The final model is then the
+learned model with the **lowest validation MAE**, a rule written into the code before these
+models were run (all metrics: [`results/s3_metrics_validation.csv`](results/s3_metrics_validation.csv)):
+
+| Validation houses 15 + 17 (pooled) | MAE (W) | Energy error | Precision | Recall | F1 |
 |---|---|---|---|---|---|
 | Always off | 13.9 | −100 % | – | 0 | 0 |
-| One-stage regressor | 9.8 | −46 % | 0.54 | 0.83 | 0.66 |
-| **Two-stage, τ = 0.2** | **7.1** | **−21 %** | **0.83** | 0.73 | **0.78** |
+| LightGBM one-stage | 9.8 | −46 % | 0.54 | 0.83 | 0.66 |
+| LightGBM one-stage + cycle filter | 9.4 | −51 % | 0.71 | 0.77 | 0.74 |
+| LightGBM two-stage | 7.1 | −21 % | 0.83 | 0.73 | 0.78 |
+| LightGBM two-stage + cycle filter | 7.0 | −23 % | 0.85 | 0.72 | 0.78 |
+| Random forest two-stage | 8.3 | −34 % | 0.83 | 0.60 | 0.70 |
+| Random forest two-stage + cycle filter | 8.2 | −37 % | 0.85 | 0.58 | 0.69 |
+| LightGBM multi-appliance | 6.8 | **−18 %** | 0.84 | **0.74** | **0.79** |
+| **LightGBM multi-appliance + cycle filter (final)** | **6.6** | −20 % | **0.86** | 0.73 | **0.79** |
 
-Because the one-stage test numbers had already been seen, **both versions are reported on test**
-below. Also tried during development and rejected on validation: an L1 objective (MAE 11.5 W,
-energy −81 %), and raising the one-stage zero threshold from 20 W up to 400 W (F1 fell to 0.28).
+History, for transparency: the one-stage model was built first, and its test scores were seen
+before the two-stage design existed. The random forest, multi-appliance model and cycle filter were
+added after the two-stage test scores had been seen. In both cases the choice was made on the
+validation table above, and **every model is reported on test**.
+
+Two other ideas were tried in quick development experiments on the validation houses (scratch runs,
+not part of the pipeline, on an earlier version of the validation minutes). Both were rejected:
+- an **L1 objective** instead of L2: MAE 11.5 vs 9.1 W, energy −81 % vs −44 %;
+- **raising the one-stage zero threshold** from 20 W to 400 W: F1 fell from 0.67 to 0.28.
 
 ### 3.3 Metrics and why each matters
 
 | Metric | What it answers | Why it is needed |
 |---|---|---|
-| **MAE** (W per minute) | how far off is each minute? | the standard NILM metric, but dominated by the ~95 % idle minutes |
+| **MAE** (W per minute) | how far off is each minute? | the standard NILM metric, but dominated by the ~97 % idle minutes |
 | **MAE when running** (W) | how well is a running machine tracked? | removes the idle-time dilution |
 | **Energy error** (%) | is total washing energy over the period right? | what a bill breakdown or savings estimate needs |
 | **Daily energy MAE** (kWh/day) | how wrong is each day's washing energy? | the granularity of a customer insight ("you washed 3 times this week") |
@@ -271,33 +300,58 @@ washing energy was 0.46 kWh/day.
 |---|---|---|---|---|---|---|---|---|---|
 | Always off | **19.0** | 540 | −100 % | 0.46 | – | 0 | 0 | 0 % | – |
 | Usage profile | 34.0 | 521 | −12 % | 0.48 | 0.04 | 0.47 | 0.08 | 55 % | 16 % |
-| LightGBM one-stage | 22.5 | 408 | −27 % | 0.31 | 0.27 | **0.65** | 0.38 | **88 %** | 40 % |
-| **LightGBM two-stage** | 20.5 | **361** | **−8 %** | **0.28** | **0.55** | 0.48 | **0.51** | 80 % | **53 %** |
+| LightGBM one-stage | 22.5 | 408 | −27 % | 0.31 | 0.26 | **0.65** | 0.38 | **88 %** | 40 % |
+| LightGBM one-stage + cycle filter | 20.8 | 414 | −38 % | 0.31 | 0.36 | 0.57 | 0.44 | **88 %** | 40 % |
+| LightGBM two-stage | 20.5 | 361 | −8 % | 0.28 | 0.55 | 0.48 | 0.51 | 80 % | 53 % |
+| LightGBM two-stage + cycle filter | 19.6 | 367 | −16 % | 0.28 | 0.59 | 0.45 | 0.51 | 80 % | 53 % |
+| Random forest two-stage | 21.3 | 390 | −18 % | 0.29 | 0.53 | 0.41 | 0.46 | 72 % | 51 % |
+| Random forest two-stage + cycle filter | 20.4 | 400 | −27 % | 0.29 | 0.56 | 0.36 | 0.44 | 72 % | 51 % |
+| LightGBM multi-appliance | 20.2 | **348** | **−7 %** | **0.28** | 0.56 | 0.48 | **0.51** | 80 % | **53 %** |
+| **LightGBM multi-appliance + cycle filter (final)** | 19.2 | 355 | −15 % | **0.28** | **0.59** | 0.45 | 0.51 | 80 % | **53 %** |
 
-Per house (two-stage): House 2: F1 0.37, energy −13 %, 63 % of washes found; House 8: F1 0.69,
-energy −10 %, 93 % found; House 20: F1 0.45, energy +7 %, 82 % found.
+Per house (final model): House 2: F1 0.33, energy −21 %, 64 % of washes found; House 8: F1 0.72,
+energy −14 %, 93 % found; House 20: F1 0.44, energy −3 %, 80 % found.
 
 **Interpretation.**
-- **The model beats both baselines on everything that needs timing or energy.** Daily-energy error
-  is 39 % lower than always-off (0.28 vs 0.46 kWh), total energy is within 8 %, and 4 of 5 washes are
-  found. The usage profile gets total energy roughly right (−12 %) but cannot say *when*: it
-  "detects" 2,787 washes for 881 real ones.
-- **Always-off still has the lowest per-minute MAE** (19.0 vs 20.5 W). This is the known weakness of
-  point-wise metrics for rare, spiky loads. Missing a wash costs the energy once, but predicting it
-  a few minutes off costs it twice (a miss plus a false alarm), so a model that does nothing looks
-  best. On validation the two-stage model *does* beat always-off on MAE (7.1 vs 13.9 W); on the
-  test houses false alarms from other heating appliances erase that margin (§3.6). We report MAE but
-  do not judge the model by it alone.
-- **Generalisation varies by house.** Validation F1 was 0.78 but test F1 is 0.51, ranging from 0.37
-  to 0.69 by house. With only 2 validation and 3 test homes, expect ±0.15 F1 on a new home.
-- **What the model relies on** ([`results/s3_feature_importance.csv`](results/s3_feature_importance.csv)): the
-  top features are minute-to-minute "activity" over 5–31 min (≈ 46 % of the classifier's gain), i.e.
-  the drum's on/off tumbling, not the 2 kW heater. That is the distinctive part of a wash (§2.5).
+- **The learned models beat both baselines on everything that needs timing or energy.** With the
+  final model, daily-energy error is 39 % lower than always-off (0.28 vs 0.46 kWh) and 4 of 5 washes
+  are found, with 53 % of detected washes real (the usage profile manages 16 %). The usage profile
+  gets total energy roughly right (−12 %) but cannot say *when*: it "detects" 2,787 washes for 881
+  real ones.
+- **Multi-appliance: a small but consistent gain.** It improves on the two-stage model on validation
+  (MAE 7.1 → 6.8 W, F1 0.78 → 0.79) and on test (MAE 20.5 → 20.2 W, energy −8 % → −7 %, cycle precision
+  52.6 % → 53.2 %). The gain is small because the binary classifier already saw dishwasher minutes,
+  as "not a wash". Naming them as their own class sharpens the boundary but adds no new
+  information, and the 1-minute aggregate alone cannot fully separate the look-alikes (§3.6).
+- **Random forest is worse than LightGBM** on validation (F1 0.70 vs 0.78) and test (F1 0.46 vs 0.51,
+  energy −18 % vs −8 %), though it still beats both baselines. The result therefore does not hinge on
+  an unusual model. Boosting simply fits these features better than a forest with fixed settings.
+- **The cycle filter is a trade-off, not a free gain.** It lowers MAE for every model (final model
+  20.2 → 19.2 W) and raises minute precision (0.56 → 0.59) by deleting short false alarms. But it also
+  deletes some genuine running minutes, so recall drops and total energy is under-estimated more
+  (−7 % → −15 %). Cycle-level recall and precision cannot change: the filter only removes events
+  that are not cycles. The selection rule (lowest validation MAE) picks the filtered version. **If
+  total energy is the priority, the unfiltered multi-appliance model is the better choice**, at
+  −7 % energy error.
+- **Always-off still has the lowest per-minute MAE** (19.0 vs 19.2 W), now by only 1 %. This is the
+  known weakness of point-wise metrics for rare, spiky loads. Missing a wash costs the energy once,
+  but predicting it a few minutes off costs it twice (a miss plus a false alarm), so a model that
+  does nothing looks good. On validation the final model halves always-off's MAE (6.6 vs 13.9 W); on
+  the test houses false alarms from other heating appliances erase that margin (§3.6). We report MAE
+  but do not judge the models by it alone.
+- **Generalisation varies by house.** Validation F1 was 0.79 but test F1 is 0.51, ranging from 0.33
+  to 0.72 by house. With only 2 validation and 3 test homes, expect ±0.2 F1 on a new home.
+- **What the final classifier relies on** ([`results/s3_feature_importance.csv`](results/s3_feature_importance.csv),
+  share of gain by feature group): counts of **heater-sized minutes** in the surrounding hour (35 %),
+  **minute-to-minute "activity"**, i.e. the drum tumbling (24 %), rolling statistics (18 %), and time of
+  day (5 %). Both top groups only exist at minute resolution (see Recommendation.md, 15/30-minute
+  data).
 
 ### 3.5 Actual vs predicted on evaluation data
 
-[`figures/s3_actual_vs_predicted.png`](figures/s3_actual_vs_predicted.png): one typical wash per test house
-(chosen automatically as the cycle closest to that house's median), with the aggregate above.
+[`figures/s3_actual_vs_predicted.png`](figures/s3_actual_vs_predicted.png): the final model on one typical
+wash per test house (chosen automatically as the cycle closest to that house's median), with the
+aggregate above.
 
 ![actual vs predicted](figures/s3_actual_vs_predicted.png)
 
@@ -306,34 +360,39 @@ energy −10 %, 93 % found; House 20: F1 0.45, energy +7 %, 82 % found.
 - **House 2**: the 12:00 wash is matched closely. The 09:15 wash's heating is **missed** because a
   ~10 kW load (probably an electric shower) runs at the same moment and swamps the 2 kW heater.
   The model still recovers the tumbling tail.
-- **House 20**: the wash is detected but its heating energy is under-predicted. From 11:20 a
-  ~1.7 kW cycling load that is not the washing machine produces a **false tail**.
+- **House 20**: the short heating block at 10:05 is **missed** and only part of the tumbling is
+  predicted. From 11:20 a ~1.7 kW cycling load that is not the washing machine produces a **false
+  tail**.
 
 [`figures/s3_daily_energy.png`](figures/s3_daily_energy.png): every full test day.
 
 ![daily energy](figures/s3_daily_energy.png)
 
-Daily predictions follow actual washing energy in Houses 8 and 20 (r = 0.79, 0.78). House 2 is
-weak (r = 0.41): many days with no wash get 0.5–2 kWh of false energy. The usage profile (grey)
+Daily predictions follow actual washing energy in Houses 8 and 20 (r = 0.79, 0.76). House 2 is
+weak (r = 0.42): many days with no wash get 0.5–2 kWh of false energy. The usage profile (grey)
 is a flat line at ~0.4 kWh/day, right on average and useless day to day.
 
 ### 3.6 Failure cases
 
 **1. Other appliances with the same "heater + motor" signature (false alarms).** For each
-false-alarm minute we checked which other sub-metered appliance was running
-([`results/s3_false_positive_sources.csv`](results/s3_false_positive_sources.csv)):
+false-alarm minute of the final model, we checked which other sub-metered appliance was running
+([`results/s3_false_positive_sources.csv`](results/s3_false_positive_sources.csv), which also
+holds the same breakdown for the binary LightGBM two-stage model):
 
 | Share of false-alarm energy | House 2 | House 8 | House 20 |
 |---|---|---|---|
-| Dishwasher | **45 %** | – | **31 %** |
-| Tumble dryer | – | – | **30 %** |
-| Washer-dryer | – | 6 % | – |
-| Kettle / microwave / toaster | 9 % | 4 % | 3 % |
-| No other *metered* appliance | 46 % | **91 %** | 36 % |
+| Dishwasher | **46 %** | – | **28 %** |
+| Tumble dryer | – | – | **31 %** |
+| Washer-dryer | – | 7 % | – |
+| Kettle / microwave / toaster | 8 % | 4 % | 3 % |
+| No other *metered* appliance | 46 % | **89 %** | 38 % |
 
 Dishwashers and tumble dryers heat at ~2 kW and then run a low-power motor: at 1-minute
-resolution, from the aggregate alone, they look like a wash. Kettles are rarely confused, because they
-are too short and have no motor tail. Most of House 8's false alarms happen when no metered appliance
+resolution, from the aggregate alone, they look like a wash. Even the multi-appliance model, which
+was trained to tell them apart, still confuses them: the shares above barely moved from the binary
+model's (dishwasher 45 % and 31 %, tumble dryer 30 %). That points to a limit of the information in a
+1-minute aggregate, not of the model. Kettles are rarely confused, because they are too short and have
+no motor tail. Most of House 8's false alarms happen when no metered appliance
 is on: an un-metered load (immersion heater, oven, shower) is responsible, which a utility could
 never check.
 
@@ -342,13 +401,13 @@ never check.
 *Example:* on New Year's Day in House 20 the washing machine never ran. The dishwasher's two 2.3 kW
 heating blocks, joined by a low pump load, were predicted as a ~2 kW wash.
 
-**2. Washes that use little energy (misses).** Comparing the 845 complete test cycles found with
-the 160 missed ([`results/s3_missed_vs_detected_cycles.csv`](results/s3_missed_vs_detected_cycles.csv)):
+**2. Washes that use little energy (misses).** Of the 845 complete test cycles, the final model
+found 684 and missed 161 ([`results/s3_missed_vs_detected_cycles.csv`](results/s3_missed_vs_detected_cycles.csv)):
 
 | | Cycles | Energy (median) | Duration | Peak | Other load during the wash |
 |---|---|---|---|---|---|
-| Detected | 685 | 0.69 kWh | 76 min | 2,281 W | 441 W |
-| Missed | 160 | 0.48 kWh | 88 min | 2,107 W | 215 W |
+| Detected | 684 | 0.69 kWh | 76 min | 2,283 W | 441 W |
+| Missed | 161 | 0.48 kWh | 88 min | 2,114 W | 228 W |
 
 Missed washes are mostly cooler/longer programmes with less heating, not ones hidden under other
 loads. A single large coincident load (the House 2 shower above) can still hide a heater, so both
@@ -374,9 +433,11 @@ spot.
 ### 3.8 What I would do next
 
 1. **Wider evaluation:** use leave-one-house-out cross-validation over all 14 homes instead of one
-   fixed 9/2/3 split, so that per-house variance (±0.15 F1) gets a proper confidence interval.
-2. **Multi-appliance training:** also predict the dishwasher and tumble dryer, and let the outputs
-   compete for the same energy. This targets the main failure case directly.
+   fixed 9/2/3 split, so that per-house variance (±0.2 F1) gets a proper confidence interval.
+2. **Full multi-appliance disaggregation:** predict the watts of the dishwasher and tumble dryer as
+   well, and share the aggregate's energy between the appliances. The look-alike *class* helped only
+   a little, because it adds no new information. Sharing energy, or adding inputs a utility might
+   have (e.g. reactive power from newer meters), is the next step against the main failure.
 3. **Seq2Point CNN** on the same split for a direct comparison; the literature suggests it learns
    cycle shapes better, at the cost of GPU training and harder inspection.
 4. **Per-house calibration:** a few days of labelled data from a new home (e.g. a customer

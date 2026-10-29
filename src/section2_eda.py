@@ -29,6 +29,15 @@ LOCAL_TZ = "Europe/London"
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
+def frozen(w):
+    """True where a 1-minute appliance reading above ON_W repeats exactly for
+    STUCK_MIN+ minutes: a monitor that stopped reporting, forward-filled by CLEAN."""
+    same = w.diff().eq(0)
+    run_id = (~same).cumsum()
+    run_len = w.groupby(run_id).transform("size")
+    return (run_len >= STUCK_MIN) & (w > ON_W)
+
+
 def load_house(house):
     """1-minute data with the washing-machine channel's missing minutes applied.
 
@@ -36,10 +45,7 @@ def load_house(house):
     """
     d = pd.read_parquet(processed_path(house))
     w = d["wm"].where(~d["outage"])
-    same = w.diff().eq(0)
-    run_id = (~same).cumsum()
-    run_len = w.groupby(run_id).transform("size")
-    d["stuck"] = (run_len >= STUCK_MIN) & (w > ON_W)
+    d["stuck"] = frozen(w)
     d["wm"] = w.where(~d["stuck"])
     return d
 

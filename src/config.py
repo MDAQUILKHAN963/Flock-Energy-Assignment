@@ -16,9 +16,6 @@ PROCESSED = DATA / "processed"                  # 1-minute parquet files produce
 FIGURES = ROOT / "figures"
 RESULTS = ROOT / "results"
 
-# Native REFIT sampling interval (seconds), per docs/CLEAN_READ_ME_081116.txt.
-NATIVE_INTERVAL_S = 8
-
 # House 1 channel labels, per docs/CLEAN_READ_ME_081116.txt.
 HOUSE1_CHANNELS = {
     "Aggregate": "Aggregate",

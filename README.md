@@ -23,24 +23,31 @@ the household aggregate at 1-minute resolution.
    4,951 washes. It reports availability, off time, timing by hour and weekday, and a cross-house
    comparison. Along the way it found **frozen sensors** in the official cleaned data (House 5: a
    constant 2,129 W for 13 h).
-3. **Disaggregation model** ([`src/section3_model.py`](src/section3_model.py)). A two-stage LightGBM
-   (classifier for "running?", regressor for watts) on a ±60-minute window of the aggregate, the
-   Seq2Point framing. It is trained on 9 homes, tuned on 2 and **tested on 3 unseen homes**, and
-   compared with always-off and usage-profile baselines.
+3. **Disaggregation models** ([`src/section3_model.py`](src/section3_model.py)). Each model reads a
+   ±60-minute window of the aggregate (the Seq2Point framing) and predicts the washing machine's
+   power for every minute. Compared on the same features and split: a one-stage LightGBM regressor;
+   two-stage models (classifier for "running?", regressor for watts) with **LightGBM** and with a
+   **random forest**; a **multi-appliance** LightGBM whose classifier also learns dishwashers, tumble
+   dryers and washer-dryers as a separate class; and each with or without a **cycle filter** (the
+   Section 2 rule applied to the predictions). The final model is the one with the lowest
+   validation MAE: **LightGBM multi-appliance + cycle filter**. All models are trained on 9 homes,
+   tuned on 2, **tested on 3 unseen homes**, and compared with always-off and usage-profile baselines.
 
 **Headline test results (3 unseen homes, ~1,400 house-days):**
 
-| | Always off | Usage profile | **Two-stage LightGBM** |
+| | Always off | Usage profile | **Final model** |
 |---|---|---|---|
-| Total energy error | −100 % | −12 % | **−8 %** |
+| Total energy error | −100 % | −12 % | **−15 %** (−7 % without the cycle filter) |
 | Daily energy MAE | 0.46 kWh | 0.48 kWh | **0.28 kWh** |
 | On/off F1 | 0 | 0.08 | **0.51** |
 | Washes found / detected washes that are real | 0 % / – | 55 % / 16 % | **80 % / 53 %** |
-| Per-minute MAE | **19.0 W** | 34.0 W | 20.5 W |
+| Per-minute MAE | **19.0 W** | 34.0 W | 19.2 W |
 
-Always-off has the lowest per-minute MAE, a known artefact for rare, spiky loads (explained in
-RESULTS.md §3.4). The main failure is confusion with **dishwashers and tumble dryers** (31–45 %
-and 30 % of false-alarm energy in the homes that have them).
+Always-off still has a marginally lower per-minute MAE, a known artefact for rare, spiky loads
+(explained in RESULTS.md §3.4). The random forest was worse than LightGBM. The multi-appliance
+classifier gave a small, consistent gain, and the cycle filter traded total energy for per-minute
+accuracy. The main failure remains confusion with **dishwashers and tumble dryers** (28–46 % and
+31 % of false-alarm energy in the homes that have them).
 
 ## Setup
 
@@ -81,20 +88,20 @@ python run_all.py
 ```
 
 This runs everything in order, from the CSVs to every table in [`results/`](results/) and figure in
-[`figures/`](figures/), in about 5–8 minutes. The steps can also be run one at a time:
+[`figures/`](figures/), in about 15 minutes. The steps can also be run one at a time:
 
 | Command | Does | Time |
 |---|---|---|
-| `python -m src.prepare_clean` | CLEAN houses → 1-minute parquet in `data/processed/`, screening table | ~35 s |
-| `python -m src.section1_raw` | Section 1: inspection, cleaning, validation vs official data, plots | ~50 s |
+| `python -m src.prepare_clean` | CLEAN houses → 1-minute parquet in `data/processed/`, screening table | ~40 s |
+| `python -m src.section1_raw` | Section 1: inspection, cleaning, validation vs official data, plots | ~1 min |
 | `python -m src.section2_eda` | Section 2: cycle detection, availability, patterns, plots | ~10–50 s |
-| `python -m src.section3_model` | Section 3: features, baselines, models, metrics, failure analysis, plots | ~3–6 min |
+| `python -m src.section3_model` | Section 3: features, baselines, 4 models × cycle filter, metrics, failure analysis, plots | ~13 min |
 
 Sections 2 and 3 need `prepare_clean` first. Section 3 also reads `results/s2_cycles.csv`.
 
 **Reproducibility check:** after deleting `results/`, `figures/` and `data/processed/`, a fresh
-`python run_all.py` (4.7 min) regenerated all 20 tables value-for-value and all 12 figures
-byte-for-byte identical to the committed ones. LightGBM uses a fixed seed.
+`python run_all.py` (12.7 min) regenerated all 20 tables value-for-value and all 12 figures
+byte-for-byte identical to the previous run's. LightGBM and the random forest use a fixed seed.
 
 ### Code layout
 
@@ -128,7 +135,8 @@ Each is justified with evidence in DATA.md or RESULTS.md.
 - **Houses 3, 11, 21** are excluded (solar PV distorts the aggregate), as are **4** (two washing
   machines) and **13** (machine replaced mid-study).
 - **Frozen sensors.** An identical washing-machine reading above 20 W for ≥ 30 min is treated as
-  missing.
+  missing. The same rule applies to the dishwasher, tumble-dryer and washer-dryer channels used as
+  look-alike labels in Section 3.
 - **`Issues` flag.** It fires at 11–46 % of washing minutes (an IAM timing artefact at switch-on),
   so it is not used to discard data. Training drops minutes whose *1-minute* appliance sum exceeds
   the aggregate; evaluation keeps every observed minute.
@@ -138,9 +146,11 @@ Each is justified with evidence in DATA.md or RESULTS.md.
 - **Split by household:** train {1, 5, 6, 7, 9, 10, 16, 18, 19}, validation {15, 17}, test {2, 8, 20}.
   No home is in two sets, so neither near-duplicate neighbouring minutes nor a household's habits
   can leak. This mirrors deploying to new customers.
-- **Validation** is used for early stopping, the classifier threshold τ and the choice between model
-  versions. The first (one-stage) model's test results were seen before the two-stage version
-  existed; that choice was made on validation numbers, and **both versions are reported on test**.
+- **Validation** is used for early stopping, each classifier's threshold τ, and the choice of final
+  model by a rule fixed in the code: **lowest validation MAE** among the learned models. The models
+  were built in stages (one-stage, then two-stage, then random forest, multi-appliance and the cycle
+  filter), and earlier test results had been seen before later models existed. Every choice was
+  made on validation numbers, and **every model is reported on test**.
 - **Metrics:** MAE, MAE while running, total and daily energy error, on/off precision/recall/F1, and
   cycle-level recall/precision. The last ones are needed because always-off scores well on MAE.
 
@@ -149,10 +159,13 @@ Each is justified with evidence in DATA.md or RESULTS.md.
 | Choice | Benefit | Cost |
 |---|---|---|
 | Simple, auditable cleaning rules | easy to defend; reproduces official data (r = 0.999) | no per-appliance limits or rolling spike filter (a few residual spikes) |
-| LightGBM, not a CNN | trains in minutes on CPU, inspectable feature importance | may learn cycle shapes less well than Seq2Point |
+| Tree models (LightGBM, random forest), not a CNN | train in minutes on CPU, inspectable feature importance | may learn cycle shapes less well than Seq2Point |
+| Multi-appliance as an extra *class*, not separate watts models | one small change to the classifier; uses look-alike labels the data already has | small gain only; it does not share out energy between appliances |
+| Cycle filter on the predictions | removes short false alarms with an already-justified rule; MAE falls | removes some real running minutes: energy error −7 % → −15 % |
+| Final model chosen by validation MAE | one rule, fixed in advance | MAE is not the metric a utility cares about most (energy, washes found) |
 | Centred ±60-min window | uses the whole wash shape | offline only: needs an hour of "future" data |
-| Split by house (3 test homes) | honest estimate for new customers | small test set: per-home F1 ranges 0.37–0.69 |
-| τ chosen on 2 validation homes | no test leakage | validation F1 (0.78) overstates test F1 (0.51) |
+| Split by house (3 test homes) | honest estimate for new customers | small test set: per-home F1 ranges 0.33–0.72 |
+| τ chosen on 2 validation homes | no test leakage | validation F1 (0.79) overstates test F1 (0.51) |
 | Every 3rd minute for training | 3× faster, unbiased (no class re-balancing) | discards near-duplicate rows only |
 
 ## AI tools used
@@ -169,14 +182,16 @@ I directed the work step by step, downloaded the data, reviewed the outputs and 
 committed and pushed the results. Every number in the documents comes from the committed code and
 can be regenerated with `python run_all.py`. Where the AI's first choice was contradicted by
 evidence, the evidence won, and both are documented: the Part1/Part2 overlap rule, the `Issues`
-handling, and the one-stage → two-stage model.
+handling and the one-stage → two-stage model. The later models (random forest, multi-appliance,
+cycle filter) were judged on validation like the rest, and all are reported on test.
 
 ## Possible improvements
 
 1. **Leave-one-house-out cross-validation** over all 14 homes, for confidence intervals on per-home
    performance.
-2. **Multi-appliance model** (washing machine, dishwasher, tumble dryer together), so that the
-   appliances compete for the same energy. This targets the main failure case.
+2. **Full multi-appliance disaggregation:** predict the watts of the washing machine, dishwasher and
+   tumble dryer together and share the aggregate's energy between them. The current model only
+   adds a look-alike *class*, which helped a little; sharing energy goes further at the main failure.
 3. **Seq2Point CNN** on the same split as a direct comparison.
 4. **Resolution study:** retrain and evaluate at 15 and 30 minutes to quantify Recommendation.md §3.
 5. **Per-appliance plausibility limits** and a rolling-median spike filter in Section 1.
